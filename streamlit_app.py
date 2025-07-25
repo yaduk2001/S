@@ -1,8 +1,9 @@
 import streamlit as st
 import os
-import torch
-from transformers import DistilBertTokenizerFast, DistilBertForSequenceClassification
+import onnxruntime as ort
+from transformers import DistilBertTokenizerFast
 import pandas as pd
+import numpy as np
 
 # Set page config for a modern look
 title = "AI Sentiment Classifier"
@@ -63,34 +64,31 @@ st.markdown("""
 
 review = st.text_area("Enter your review:", height=120, key="review_input")
 
-# Load model and tokenizer only once
+# Load ONNX model and tokenizer only once
 @st.cache_resource
 def load_model():
-    model_dir = './sentiment_model'
-    tokenizer = DistilBertTokenizerFast.from_pretrained(model_dir)
-    model = DistilBertForSequenceClassification.from_pretrained(model_dir)
-    model.eval()
-    # Apply dynamic quantization
-    quantized_model = torch.quantization.quantize_dynamic(
-        model, {torch.nn.Linear}, dtype=torch.qint8
-    )
-    # Load quantized weights
-    quantized_model.load_state_dict(torch.load('quantized_model.pt', map_location='cpu'))
-    quantized_model.eval()
-    return tokenizer, quantized_model
+    model_path = './onnx_model/model_quantized.onnx'
+    tokenizer = DistilBertTokenizerFast.from_pretrained('./onnx_model')
+    session = ort.InferenceSession(model_path)
+    return tokenizer, session
 
-tokenizer, model = load_model()
+tokenizer, session = load_model()
 
 sentiment = None
 show_result = False
 
 if st.button("Analyze Sentiment"):
     if review.strip():
-        # Tokenize and predict
-        inputs = tokenizer([review], padding=True, truncation=True, max_length=128, return_tensors='pt')
-        with torch.no_grad():
-            outputs = model(input_ids=inputs['input_ids'], attention_mask=inputs['attention_mask'])
-            pred = torch.argmax(outputs.logits, dim=1).item()
+        # Tokenize and prepare ONNX input
+        inputs = tokenizer([review], padding='max_length', truncation=True, max_length=128, return_tensors='np')
+        ort_inputs = {
+            'input_ids': inputs['input_ids'].astype(np.int64),
+            'attention_mask': inputs['attention_mask'].astype(np.int64)
+        }
+        # ONNX inference
+        outputs = session.run(None, ort_inputs)
+        logits = outputs[0]
+        pred = int(np.argmax(logits, axis=1)[0])
         sentiment_map = {0: "negative", 1: "neutral", 2: "positive"}
         sentiment = sentiment_map.get(pred, "unknown")
         color = {"positive": "#00FFB3", "neutral": "#FFD600", "negative": "#FF4B4B"}[sentiment]
